@@ -48,6 +48,24 @@ find_klipper_config_dirs() {
     fi
 }
 
+# Helper to find Moonraker's .asvc file (typically in the same directory as moonraker.conf)
+find_moonraker_asvc() {
+    candidate_files=$(
+        (
+            # Check standard locations first
+            for dir in "${USER_HOME}/printer_data" "${USER_HOME}"; do
+                if [ -f "${dir}/moonraker.asvc" ]; then
+                    echo "${dir}/moonraker.asvc"
+                fi
+            done
+            # Search for moonraker.asvc in subdirectories
+            find "${USER_HOME}" -maxdepth 3 -name "moonraker.asvc" 2>/dev/null
+        ) | head -1
+    )
+
+    echo "${candidate_files}"
+}
+
 PYTHON_BIN="${REPO_DIR}/venv/bin/python3"
 SERVICE_SCRIPT="${REPO_DIR}/spoolman2klipper.py"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
@@ -108,6 +126,17 @@ echo "Enabling and starting systemd service..."
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable "${SERVICE_NAME}"
 $SUDO systemctl restart "${SERVICE_NAME}"
+
+# 4. Add service to Moonraker's allowed services list
+MOONRAKER_ASVC=$(find_moonraker_asvc)
+if [ -n "${MOONRAKER_ASVC}" ] && [ -f "${MOONRAKER_ASVC}" ]; then
+    if ! grep -q "^${SERVICE_NAME}$" "${MOONRAKER_ASVC}"; then
+        echo "Adding ${SERVICE_NAME} to Moonraker's allowed services list at ${MOONRAKER_ASVC}..."
+        echo "${SERVICE_NAME}" >> "${MOONRAKER_ASVC}"
+    fi
+else
+    echo "Warning: moonraker.asvc not found. Moonraker may not be able to manage this service automatically."
+fi
 
 echo "Installed and started ${SERVICE_NAME} successfully for user ${SERVICE_USER}."
 

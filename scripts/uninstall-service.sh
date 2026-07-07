@@ -48,6 +48,24 @@ find_klipper_config_dirs() {
     fi
 }
 
+# Helper to find Moonraker's .asvc file (typically in the same directory as moonraker.conf)
+find_moonraker_asvc() {
+    candidate_files=$(
+        (
+            # Check standard locations first
+            for dir in "${USER_HOME}/printer_data" "${USER_HOME}"; do
+                if [ -f "${dir}/moonraker.asvc" ]; then
+                    echo "${dir}/moonraker.asvc"
+                fi
+            done
+            # Search for moonraker.asvc in subdirectories
+            find "${USER_HOME}" -maxdepth 3 -name "moonraker.asvc" 2>/dev/null
+        ) | head -1
+    )
+
+    echo "${candidate_files}"
+}
+
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 
 # Determine sudo commands
@@ -74,13 +92,22 @@ if [ -f "${SERVICE_PATH}" ]; then
     $SUDO systemctl daemon-reload
 fi
 
-# 2. Remove virtualenv
+# 2. Remove service from Moonraker's allowed services list
+MOONRAKER_ASVC=$(find_moonraker_asvc)
+if [ -n "${MOONRAKER_ASVC}" ] && [ -f "${MOONRAKER_ASVC}" ]; then
+    if grep -q "^${SERVICE_NAME}$" "${MOONRAKER_ASVC}"; then
+        echo "Removing ${SERVICE_NAME} from Moonraker's allowed services list at ${MOONRAKER_ASVC}..."
+        sed -i "/^${SERVICE_NAME}$/d" "${MOONRAKER_ASVC}"
+    fi
+fi
+
+# 3. Remove virtualenv
 if [ -d "${REPO_DIR}/venv" ]; then
     echo "Removing virtual environment at ${REPO_DIR}/venv..."
     rm -rf "${REPO_DIR}/venv"
 fi
 
-# 3. Remove configuration file from Klipper config directories
+# 4. Remove configuration file from Klipper config directories
 CONFIG_DIRS=$(find_klipper_config_dirs)
 echo "${CONFIG_DIRS}" | while read -r config_dir; do
     if [ -n "${config_dir}" ]; then

@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import sys
-from pathlib import Path
 from typing import Any, Dict, Optional, Set, Union
 from urllib.parse import urlsplit, urlunsplit
 
@@ -427,7 +426,7 @@ def load_config() -> Optional[Dict[str, Any]]:
             try:
                 with open(cfg_filename, "r", encoding="utf-8") as file_pointer:
                     return toml.load(file_pointer)
-            except Exception as exc:
+            except (OSError, toml.TomlDecodeError) as exc:
                 logging.error("Failed to load config from %s: %s", cfg_filename, exc)
     return None
 
@@ -436,12 +435,8 @@ if __name__ == "__main__":
     logging.basicConfig(encoding="utf-8", level=logging.INFO)
     config_data = load_config()
     if not config_data:
-        print(
-            "ERROR: The configuration file was not found, and the default repository configuration is also missing.",
-            file=sys.stderr,
-        )
+        print("ERROR: Missing configuration file in all supported locations.", file=sys.stderr)
         sys.exit(1)
 
     spoolman2klipper = Spoolman2Klipper(config_data)
     spoolman2klipper.run()
-

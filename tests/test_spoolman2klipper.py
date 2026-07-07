@@ -6,11 +6,12 @@
 # pylint: disable=missing-function-docstring,too-few-public-methods
 
 import asyncio
+import io
 
 import aiohttp
 import pytest
 
-from spoolman2klipper import SPOOL_VARS_DEFAULT, Spoolman2Klipper
+from spoolman2klipper import SPOOL_VARS_DEFAULT, Spoolman2Klipper, load_config
 
 
 class FakeSpoolmanResponse:
@@ -383,3 +384,65 @@ async def test_moonraker_connection_loop_reconnects_after_disconnect():
     assert all(server.closed for server in created_servers)
     assert "notify_active_spool_set" in created_servers[-1].notification_handlers
     assert "notify_klippy_ready" in created_servers[-1].notification_handlers
+
+
+def test_load_config_skips_invalid_toml_and_uses_next_existing_file(monkeypatch):
+    first_path = "~/printer_data/config/spoolman2klipper.cfg"
+    second_path = "~/klipper_config/spoolman2klipper.cfg"
+
+    monkeypatch.setattr("spoolman2klipper.os.path.expanduser", lambda path: path)
+    monkeypatch.setattr(
+        "spoolman2klipper.os.path.exists",
+        lambda path: path in {first_path, second_path},
+    )
+
+    def fake_open(path, *_args, **_kwargs):
+        if path == first_path:
+            return io.StringIO('invalid = "unterminated')
+        if path == second_path:
+            return io.StringIO(
+                "[spoolman2klipper]\n"
+                "moonraker_url = 'ws://moonraker'\n"
+                "spoolman_url = 'http://spoolman'\n"
+            )
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+
+    assert load_config() == {
+        "spoolman2klipper": {
+            "moonraker_url": "ws://moonraker",
+            "spoolman_url": "http://spoolman",
+        }
+    }
+
+
+def test_load_config_skips_unreadable_file_and_uses_next_existing_file(monkeypatch):
+    first_path = "~/printer_data/config/spoolman2klipper.cfg"
+    second_path = "~/klipper_config/spoolman2klipper.cfg"
+
+    monkeypatch.setattr("spoolman2klipper.os.path.expanduser", lambda path: path)
+    monkeypatch.setattr(
+        "spoolman2klipper.os.path.exists",
+        lambda path: path in {first_path, second_path},
+    )
+
+    def fake_open(path, *_args, **_kwargs):
+        if path == first_path:
+            raise OSError("permission denied")
+        if path == second_path:
+            return io.StringIO(
+                "[spoolman2klipper]\n"
+                "moonraker_url = 'ws://moonraker'\n"
+                "spoolman_url = 'http://spoolman'\n"
+            )
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+
+    assert load_config() == {
+        "spoolman2klipper": {
+            "moonraker_url": "ws://moonraker",
+            "spoolman_url": "http://spoolman",
+        }
+    }

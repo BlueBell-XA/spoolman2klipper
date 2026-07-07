@@ -148,6 +148,9 @@ dmypy.json
 # pytype static type analyzer
 .pytype/
 
+# Pylint local cache
+.pylint.d/
+
 # Cython debug symbols
 cython_debug/
 

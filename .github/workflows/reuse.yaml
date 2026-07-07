@@ -21,7 +21,7 @@ jobs:
           python-version: '3.10'
       - name: Install dependencies
         run: |
-          pip install reuse
+          pip install 'reuse[charset-normalizer]'
       - name: Test REUSE compliance
         run: |
           reuse lint

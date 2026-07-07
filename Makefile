@@ -15,14 +15,15 @@ SRC=$(wildcard *.py lib/*.py)
 
 help:
 	@echo Available targets:
+	@echo test - run the test suite.
 	@echo fmt - formats the python files.
 	@echo lint - check the python files with pylint.
 	@echo clean - remove venv directory.
 
-$(VENV_TIMESTAMP): requirements.txt
+$(VENV_TIMESTAMP): requirements.txt requirements-dev.txt
 	@echo Building $(VENV)
 	python3 -m venv $(VENV)
-	$(PIP) install -r $<
+	$(PIP) install -r requirements-dev.txt
 	touch $@
 
 $(BLACK): $(VENV_TIMESTAMP)
@@ -40,10 +41,13 @@ fmt: $(BLACK)
 lint: $(PYLINT)
 	$(PYLINT) $(SRC)
 
+test: $(VENV_TIMESTAMP)
+	$(VENV)/bin/python -m pytest -q
+
 reuse: $(REUSE)
 	$(REUSE) lint
 
 clean:
 	@rm -rf $(VENV) 2>/dev/null
 
-.PHONY: clean fmt lint reuse
+.PHONY: clean fmt lint reuse test

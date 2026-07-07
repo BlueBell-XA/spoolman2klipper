@@ -1,112 +1,169 @@
 <!--
 SPDX-FileCopyrightText: 2025 Sebastian Andersson <sebastian@bittr.nu>
+SPDX-FileCopyrightText: 2026 BlueBell-XA
 
 SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
-[![REUSE status](https://api.reuse.software/badge/github.com/bofh69/spool2klipper)](https://api.reuse.software/info/github.com/bofh69/spool2klipper)
-![GitHub Workflow Status](https://github.com/bofh69/spool2klipper/actions/workflows/pylint.yml/badge.svg)
+# spoolman2klipper
 
+`spoolman2klipper` is a small Moonraker client service that copies the active
+Spoolman spool and filament metadata into Klipper macro variables.
 
-# spool2klipper
+It exists so other Klipper macros can synchronously read filament data such as
+material, colour, recommended hotend temperature, bed temperature, diameter,
+density, and remaining weight.
 
-A program that transfers info about Spoolman's data about the active Spool/Filament/Manufacturer to
-[Klipper](https://www.klipper3d.org/).
+## How It Works
 
-The program is a [Moonraker](https://github.com/Arksine/moonraker) agent that listens for notifications
-about changed spools. When the spool is changed, it asks spoolman about the changed spool's data
-and it asks Moonraker to run special gcode macros in Klipper for storing data about the new spool.
+The service:
 
-## Prepare for running spool2klipper:
+- connects to Moonraker over websocket
+- listens for Moonraker `active_spool_set` notifications
+- fetches the active spool from Spoolman
+- writes a fixed set of fields into one Klipper holder macro with
+  `SET_GCODE_VARIABLE`
 
-In the cloned repository's dir run:
+The default holder macro is `SPOOLMAN`. Missing macros or missing variables are
+skipped, so you can define only the variables you actually use.
+
+## Klipper Macro
+
+Add this holder macro to your Klipper config, or copy
+`klipper-example-macros.cfg`.
+
+```ini
+[gcode_macro SPOOLMAN]
+description: Holder macro populated by spoolman2klipper
+variable_spool_id: -1
+variable_filament_name: "''"
+variable_material: "''"
+variable_vendor: "''"
+variable_color: "''"
+variable_extruder_temp: 0
+variable_bed_temp: 0
+variable_diameter: 0.0
+variable_density: 0.0
+variable_remaining_weight: 0.0
+variable_filament_weight: 0.0
+gcode:
+  {action_respond_info("Spoolman data holder macro")}
+```
+
+Other macros can then read the values:
+
+```ini
+[gcode_macro PRINT_START]
+gcode:
+  {% set spool = printer["gcode_macro SPOOLMAN"] %}
+  {% if spool.extruder_temp > 0 %}
+    M104 S{spool.extruder_temp}
+  {% endif %}
+  {% if spool.bed_temp > 0 %}
+    M140 S{spool.bed_temp}
+  {% endif %}
+```
+
+## Variables
+
+- `spool_id`
+- `filament_name`
+- `material`
+- `vendor`
+- `color`
+- `extruder_temp`
+- `bed_temp`
+- `diameter`
+- `density`
+- `remaining_weight`
+- `filament_weight`
+
+## Install
+
+On the printer:
+
 ```sh
+cd ~
+git clone https://github.com/BlueBell-XA/spoolman2klipper.git
+cd spoolman2klipper
 python3 -m venv venv
 venv/bin/pip3 install -r requirements.txt
 ```
 
-<!-- Copy and update the `spool2klipper.cfg` to `~/.config/spool2klipper/spool2klipper.cfg`. -->
+Copy and edit the config:
 
-## Preparing Klipper
+```sh
+mkdir -p ~/.config/spoolman2klipper
+cp spoolman2klipper.cfg ~/.config/spoolman2klipper/spoolman2klipper.cfg
+```
 
-When spool data is to be sent to Klipper, spool2klipper looks for gcode macros with the name
-`_SPOOLMAN_SET_FIELD_`_fieldname_. Ie:
-`_SPOOLMAN_SET_FIELD_filament_id`
+Default config:
 
-The macro will be called with the argument `VALUE=`_fields-value_ which stores the _fieldname_
-and _fields-value_ into the printer `save_variables`.
+```toml
+[spoolman2klipper]
+moonraker_url = "ws://localhost:7125/websocket"
+spoolman_url = "http://localhost:7912/api"
+klipper_macro = "SPOOLMAN"
+sync_on_connect = true
+reconnect_delay = 2.0
+request_timeout = 5.0
+```
 
-When a new spool is loaded, or if the active spool is ejected, this agent will call 
-`_SPOOLMAN_CLEAR_FIELDS` (if available) before storing new fields. This will ensure all previously 
-stored values are cleared in the event there are filaments with empty fields.
+## systemd
 
-After all the macros have been called, a _MSG_ will be sent to the terminal via 
-`_SPOOLMAN_DONE` if available.
+Generate and install the systemd service from the current repo path:
 
-Add gcode macros to Klipper's config to receive and handle the fields you are interested in.
+```sh
+sudo ./scripts/install-service.sh
+```
 
-Here's a simple example:
+The installer uses the invoking sudo user by default. To force a user:
+
+```sh
+sudo SPOOLMAN2KLIPPER_USER=mks ./scripts/install-service.sh
+```
+
+Check status:
+
+```sh
+sudo systemctl status spoolman2klipper
+```
+
+## Mainsail / Moonraker Updates
+
+Copy `moonraker-spoolman2klipper.cfg` next to `moonraker.conf`, then include it
+from `moonraker.conf`:
 
 ```ini
-[gcode_macro _SPOOLMAN_SET_FIELD_filament_id]
-description: Store loaded filament's ID
-gcode:
-  {% if params.VALUE %}
-    {% set id = params.VALUE|int %}
-    SAVE_VARIABLE VARIABLE=active_filament_id VALUE={id}
-    RESPOND MSG="Setting active_filament_id to {id}"
-  {% else %}
-    {action_respond_info("Parameter 'VALUE' is required")}
-  {% endif %}
-
-[gcode_macro _SPOOLMAN_CLEAR_FIELDS]
-description: Removes spool info
-gcode:
-    SAVE_VARIABLE VARIABLE=active_filament_id VALUE=None
-    RESPOND MSG="Clearing active_filament_id"
-
-[gcode_macro _SPOOLMAN_DONE]
-description: The data was transferred
-gcode:
-    RESPOND TYPE=command MSG="CHANGE FILAMENT"
-
+[include moonraker-spoolman2klipper.cfg]
 ```
 
-## Run automatically with systemd
+Moonraker update manager is configured to pull from:
 
-Copy spool2klippper.service to `/etc/systemd/system`, then run:
+```text
+https://github.com/BlueBell-XA/spoolman2klipper.git
+```
+
+After this is configured, Mainsail should show updates when the GitHub repo has
+new commits on `main`.
+
+## Development
+
+Create a venv and install dependencies:
 
 ```sh
-sudo systemctl start spool2klipper
-sudo systemctl enable spool2klipper
+python3 -m venv venv
+venv/bin/pip3 install -r requirements-dev.txt
 ```
 
-To see its status, run:
+Run tests:
+
 ```sh
-sudo systemctl status spool2klipper
+venv/bin/python -m pytest -q
 ```
 
-## Automatic upgrades with Moonraker
+Run lint:
 
-Moonraker can be configured to help upgrade spool2klipper.
-
-Copy the the `moonraker-spool2klipper.cfg` file to the same dir as where
-`moonraker.conf` is. Include the config file by adding:
-```toml
-[include moonraker-spool2klipper.cfg]
+```sh
+make lint
 ```
-to Moonraker's config file (moonraker.conf).
-
-## See also
-
-This program was made to make it easier to use [spoolman2slicer](https://github.com/bofh69/spoolman2slicer) when not using [nfc2klipper](https://github.com/bofh69/nfc2klipper).
-
-## Developer info
-
-Pull requests are happily accepted, but before making one make sure
-the code is formatted with black and passes pylint without errors.
-
-The code can be formatted by running `make fmt` and checked with pylint
-with `make lint`.
-
-If you add a new file, run "make reuse" to lint its licensing information.

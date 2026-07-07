@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 BlueBell-XA
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Template source for scripts/install-service.sh.
+# Do not copy this file directly to /etc/systemd/system without replacing
+# the __...__ placeholders.
+
+[Unit]
+Description=Starts spoolman2klipper
+Documentation=https://github.com/BlueBell-XA/spoolman2klipper
+After=moonraker.service network-online.target
+Wants=network-online.target
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+WorkingDirectory=__REPO_DIR__
+ExecStart=__PYTHON_BIN__ __SERVICE_SCRIPT__
+Restart=always
+RestartSec=10

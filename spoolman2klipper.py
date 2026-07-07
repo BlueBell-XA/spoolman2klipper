@@ -10,7 +10,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Set, Union
@@ -413,25 +412,24 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
 def load_config() -> Optional[Dict[str, Any]]:
     """Load user configuration from the supported config locations."""
 
-    for path in ["~/" + CFG_FILE, CFG_DIR + "/" + CFG_FILE]:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    search_paths = [
+        "~/printer_data/config/" + CFG_FILE,
+        "~/klipper_config/" + CFG_FILE,
+        "~/" + CFG_FILE,
+        CFG_DIR + "/" + CFG_FILE,
+        os.path.join(script_dir, CFG_FILE),
+    ]
+
+    for path in search_paths:
         cfg_filename = os.path.expanduser(path)
         if os.path.exists(cfg_filename):
-            with open(cfg_filename, "r", encoding="utf-8") as file_pointer:
-                return toml.load(file_pointer)
+            try:
+                with open(cfg_filename, "r", encoding="utf-8") as file_pointer:
+                    return toml.load(file_pointer)
+            except Exception as exc:
+                logging.error("Failed to load config from %s: %s", cfg_filename, exc)
     return None
-
-
-def install_default_config() -> None:
-    """Copy the repo default config to the user's config directory."""
-
-    cfg_dir = os.path.expanduser(CFG_DIR)
-    Path(cfg_dir).mkdir(parents=True, exist_ok=True)
-
-    script_dir = os.path.dirname(__file__)
-    from_filename = os.path.join(script_dir, CFG_FILE)
-    to_filename = os.path.join(cfg_dir, CFG_FILE)
-    shutil.copyfile(from_filename, to_filename)
-    print(f"Created {to_filename}, please update it", file=sys.stderr)
 
 
 if __name__ == "__main__":
@@ -439,11 +437,11 @@ if __name__ == "__main__":
     config_data = load_config()
     if not config_data:
         print(
-            "WARNING: The configuration file is missing, installing a default version.",
+            "ERROR: The configuration file was not found, and the default repository configuration is also missing.",
             file=sys.stderr,
         )
-        install_default_config()
         sys.exit(1)
 
     spoolman2klipper = Spoolman2Klipper(config_data)
     spoolman2klipper.run()
+

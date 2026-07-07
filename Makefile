@@ -23,6 +23,7 @@ help:
 $(VENV_TIMESTAMP): requirements.txt requirements-dev.txt
 	@echo Building $(VENV)
 	python3 -m venv $(VENV)
+	$(PIP) install --upgrade pip setuptools wheel
 	$(PIP) install -r requirements-dev.txt
 	touch $@
 

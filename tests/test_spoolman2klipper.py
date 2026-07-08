@@ -139,6 +139,33 @@ class DisconnectingMoonrakerServer(FakeMoonrakerServer):
         self.closed = True
 
 
+class FailingSpoolmanService(Spoolman2Klipper):
+    """Service fake whose Spoolman websocket cycle always fails."""
+
+    def __init__(self, config, failure):
+        super().__init__(config)
+        self.failure = failure
+        self.cycle_calls = 0
+
+    async def spoolman_connection_cycle(self):
+        self.cycle_calls += 1
+        raise self.failure
+
+
+class RecoveringSpoolmanService(Spoolman2Klipper):
+    """Service fake whose Spoolman websocket fails once and then recovers."""
+
+    def __init__(self, config, failure):
+        super().__init__(config)
+        self.failure = failure
+        self.cycle_calls = 0
+
+    async def spoolman_connection_cycle(self):
+        self.cycle_calls += 1
+        if self.cycle_calls == 1:
+            raise self.failure
+
+
 def make_service(macro_variables=None):
     """Build a service instance with fake dependencies for unit tests."""
 
@@ -153,6 +180,18 @@ def make_service(macro_variables=None):
     service.moonraker_server = FakeMoonrakerServer()
     service.macro_variables = set(macro_variables or SPOOL_VARS_DEFAULT)
     return service
+
+
+def base_config():
+    """Build a minimal service config for tests."""
+
+    return {
+        "spoolman2klipper": {
+            "moonraker_url": "ws://moonraker.local/websocket",
+            "spoolman_url": "http://spoolman.local/api",
+            "klipper_macro": "SPOOLMAN",
+        }
+    }
 
 
 def representative_spool_payload():
@@ -284,6 +323,51 @@ async def test_run_gcode_waits_for_moonraker_result_instead_of_sending_notificat
     assert service.moonraker_server.printer.gcode.scripts == [
         ("SET_GCODE_VARIABLE MACRO=SPOOLMAN VARIABLE=spool_id VALUE=123", False)
     ]
+
+
+@pytest.mark.asyncio
+async def test_spoolman_connection_failure_notifies_mainsail_once():
+    service = FailingSpoolmanService(base_config(), aiohttp.ClientError("refused"))
+    service.moonraker_server = FakeMoonrakerServer()
+    service.reconnect_delay = 0
+
+    await service.spoolman_connection_loop(max_cycles=2)
+
+    scripts = [script for script, _notify in service.moonraker_server.printer.gcode.scripts]
+    assert scripts == [
+        'RESPOND TYPE=error MSG="spoolman2klipper: Unable to connect to Spoolman '
+        'at ws://spoolman.local/api/v1/spool: refused"'
+    ]
+
+
+@pytest.mark.asyncio
+async def test_spoolman_connection_recovery_resets_mainsail_warning_state():
+    service = RecoveringSpoolmanService(base_config(), aiohttp.ClientError("refused"))
+    service.moonraker_server = FakeMoonrakerServer()
+    service.reconnect_delay = 0
+
+    await service.spoolman_connection_loop(max_cycles=2)
+
+    scripts = [script for script, _notify in service.moonraker_server.printer.gcode.scripts]
+    assert scripts == [
+        'RESPOND TYPE=error MSG="spoolman2klipper: Unable to connect to Spoolman '
+        'at ws://spoolman.local/api/v1/spool: refused"',
+        'RESPOND TYPE=echo MSG="spoolman2klipper: Reconnected to Spoolman"',
+    ]
+    assert service.spoolman_connection_warning_sent is False
+
+
+@pytest.mark.asyncio
+async def test_spoolman_connection_failure_without_moonraker_only_logs(caplog):
+    service = FailingSpoolmanService(base_config(), aiohttp.ClientError("refused"))
+    service.moonraker_server = None
+    service.reconnect_delay = 0
+
+    with caplog.at_level(logging.WARNING):
+        await service.spoolman_connection_loop(max_cycles=1)
+
+    assert "Spoolman websocket cycle failed: refused" in caplog.text
+    assert service.spoolman_connection_warning_sent is False
 
 
 @pytest.mark.asyncio

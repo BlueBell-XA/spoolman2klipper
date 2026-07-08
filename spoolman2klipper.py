@@ -67,6 +67,7 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
         self.macro_variables: Optional[Set[str]] = None
         self.active_spool_id: Optional[str] = None
         self.active_spool_data: Optional[Dict[str, Any]] = None
+        self.spoolman_connection_warning_sent = False
 
     def extract_spool_variables(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Flatten the Spoolman spool payload into Klipper macro variables."""
@@ -347,6 +348,44 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
             _notification=False,
         )
 
+    async def _notify_mainsail(self, message: str, message_type: str = "error") -> bool:
+        """Send a RESPOND message that printer web UIs can surface."""
+
+        if self.moonraker_server is None:
+            logging.debug("Skipping Mainsail notification; Moonraker is not connected")
+            return False
+
+        safe_message = self._sanitise_gcode_string(message)
+        script = f'RESPOND TYPE={message_type} MSG="{safe_message}"'
+        try:
+            await self._run_gcode(script)
+            return True
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logging.warning("Failed to send Mainsail notification: %s", exc)
+            return False
+
+    async def _notify_spoolman_connection_failure(self, exc: Exception) -> None:
+        """Warn the UI once while Spoolman remains unreachable."""
+
+        if self.spoolman_connection_warning_sent:
+            return
+
+        message = (
+            f"{PROGNAME}: Unable to connect to Spoolman at "
+            f"{self.spoolman_ws_url}: {exc}"
+        )
+        if await self._notify_mainsail(message, "error"):
+            self.spoolman_connection_warning_sent = True
+
+    async def _notify_spoolman_connection_recovered(self) -> None:
+        """Notify once when Spoolman reconnects after a visible warning."""
+
+        if not self.spoolman_connection_warning_sent:
+            return
+
+        if await self._notify_mainsail(f"{PROGNAME}: Reconnected to Spoolman", "echo"):
+            self.spoolman_connection_warning_sent = False
+
     async def moonraker_connection_loop(self, max_cycles: Optional[int] = None) -> None:
         """Reconnect to Moonraker whenever the websocket receive loop exits."""
 
@@ -405,16 +444,24 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
             self.handle_spoolman_status_changed
         )
 
-    async def spoolman_connection_loop(self) -> None:
+    async def spoolman_connection_loop(self, max_cycles: Optional[int] = None) -> None:
         """Reconnect to Spoolman's websocket whenever it exits."""
 
+        cycles = 0
         while not self.is_closing:
+            if max_cycles is not None and cycles >= max_cycles:
+                return
+            cycles += 1
             try:
                 await self.spoolman_connection_cycle()
+                await self._notify_spoolman_connection_recovered()
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logging.warning("Spoolman websocket cycle failed: %s", exc)
+                await self._notify_spoolman_connection_failure(exc)
 
-            if not self.is_closing:
+            if not self.is_closing and (
+                max_cycles is None or cycles < max_cycles
+            ):
                 await asyncio.sleep(self.reconnect_delay)
 
     async def spoolman_connection_cycle(self) -> None:

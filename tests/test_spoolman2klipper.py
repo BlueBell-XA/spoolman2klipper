@@ -104,27 +104,11 @@ class FakeSpoolmanApi:
         return self.response
 
 
-class FakeAnnouncementsApi:
-    """Provides Moonraker announcement APIs used for persistent UI warnings."""
-
-    def __init__(self):
-        self.added = []
-        self.removed = []
-
-    async def add_internal_announcement(self, **kwargs):
-        self.added.append(kwargs)
-        return {"entry_id": "spoolman2klipper/generated"}
-
-    async def remove_announcement(self, entry_id):
-        self.removed.append(entry_id)
-
-
 class FakeServerNamespace:
     """Provides nested Moonraker server APIs used by startup sync."""
 
     def __init__(self, spool_id_response=None):
         self.spoolman = FakeSpoolmanApi(spool_id_response or {"spool_id": None})
-        self.announcements = FakeAnnouncementsApi()
 
 
 class FakeMoonrakerServer:
@@ -342,43 +326,34 @@ async def test_run_gcode_waits_for_moonraker_result_instead_of_sending_notificat
 
 
 @pytest.mark.asyncio
-async def test_spoolman_connection_failure_creates_announcement_once():
+async def test_spoolman_connection_failure_notifies_mainsail_once():
     service = FailingSpoolmanService(base_config(), aiohttp.ClientError("refused"))
     service.moonraker_server = FakeMoonrakerServer()
     service.reconnect_delay = 0
 
     await service.spoolman_connection_loop(max_cycles=2)
 
-    announcements = service.moonraker_server.server.announcements
-    assert announcements.added == [
-        {
-            "title": "spoolman2klipper cannot reach Spoolman",
-            "desc": (
-                "Unable to connect to Spoolman at "
-                "ws://spoolman.local/api/v1/spool: refused"
-            ),
-            "url": "",
-            "priority": "warning",
-            "feed": "spoolman2klipper",
-        }
-    ]
     scripts = [script for script, _notify in service.moonraker_server.printer.gcode.scripts]
-    assert scripts == []
+    assert scripts == [
+        'RESPOND TYPE=error MSG="spoolman2klipper: Unable to connect to Spoolman '
+        'at ws://spoolman.local/api/v1/spool: refused"'
+    ]
 
 
 @pytest.mark.asyncio
-async def test_spoolman_connection_recovery_removes_announcement():
+async def test_spoolman_connection_recovery_resets_mainsail_warning_state():
     service = RecoveringSpoolmanService(base_config(), aiohttp.ClientError("refused"))
     service.moonraker_server = FakeMoonrakerServer()
     service.reconnect_delay = 0
 
     await service.spoolman_connection_loop(max_cycles=2)
 
-    announcements = service.moonraker_server.server.announcements
-    assert len(announcements.added) == 1
-    assert announcements.removed == ["spoolman2klipper/generated"]
     scripts = [script for script, _notify in service.moonraker_server.printer.gcode.scripts]
-    assert scripts == []
+    assert scripts == [
+        'RESPOND TYPE=error MSG="spoolman2klipper: Unable to connect to Spoolman '
+        'at ws://spoolman.local/api/v1/spool: refused"',
+        'RESPOND TYPE=echo MSG="spoolman2klipper: Reconnected to Spoolman"',
+    ]
     assert service.spoolman_connection_warning_sent is False
 
 

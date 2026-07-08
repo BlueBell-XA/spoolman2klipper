@@ -3,10 +3,11 @@
 # SPDX-FileCopyrightText: 2026 BlueBell-XA
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# pylint: disable=missing-function-docstring,too-few-public-methods
+# pylint: disable=missing-function-docstring,protected-access,too-few-public-methods
 
 import asyncio
 import io
+import logging
 
 import aiohttp
 import pytest
@@ -89,12 +90,14 @@ class FakePrinter:
 
 
 class FakeSpoolmanApi:
-    """Provides the Moonraker server.spoolman.spool_id API shape."""
+    """Provides the Moonraker server.spoolman API shape used by startup sync."""
 
     def __init__(self, response):
         self.response = response
+        self.get_spool_id_calls = 0
 
-    async def spool_id(self):
+    async def get_spool_id(self):
+        self.get_spool_id_calls += 1
         return self.response
 
 
@@ -220,6 +223,17 @@ def test_format_set_variable_gcode_leaves_numeric_values_unquoted():
 
 
 @pytest.mark.asyncio
+async def test_run_gcode_waits_for_moonraker_result_instead_of_sending_notification():
+    service = make_service()
+
+    await service._run_gcode("SET_GCODE_VARIABLE MACRO=SPOOLMAN VARIABLE=spool_id VALUE=123")
+
+    assert service.moonraker_server.printer.gcode.scripts == [
+        ("SET_GCODE_VARIABLE MACRO=SPOOLMAN VARIABLE=spool_id VALUE=123", False)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_push_klipper_variables_only_sends_defined_macro_variables():
     service = make_service(macro_variables={"spool_id", "material"})
 
@@ -290,6 +304,21 @@ def test_parse_spool_id_response_accepts_direct_and_wrapped_shapes():
 
 
 @pytest.mark.asyncio
+async def test_startup_sync_uses_documented_moonraker_get_spool_id_method():
+    service = make_service(macro_variables={"spool_id"})
+    service.moonraker_server = FakeMoonrakerServer({"spool_id": 123})
+    service.http_session = FakeHttpSession(
+        [FakeSpoolmanResponse(200, representative_spool_payload())]
+    )
+
+    await service.sync_current_active_spool()
+
+    assert service.moonraker_server.server.spoolman.get_spool_id_calls == 1
+    scripts = [script for script, _notify in service.moonraker_server.printer.gcode.scripts]
+    assert scripts == ["SET_GCODE_VARIABLE MACRO=SPOOLMAN VARIABLE=spool_id VALUE=123"]
+
+
+@pytest.mark.asyncio
 async def test_fetch_spool_info_converts_aiohttp_and_timeout_errors_to_exceptions():
     service = make_service()
     service.http_session = FakeHttpSession(
@@ -324,6 +353,19 @@ async def test_spoolman_updated_event_refreshes_active_spool_variables():
         "SET_GCODE_VARIABLE MACRO=SPOOLMAN VARIABLE=spool_id VALUE=123",
         'SET_GCODE_VARIABLE MACRO=SPOOLMAN VARIABLE=material VALUE="\'ASA\'"',
     ]
+
+
+@pytest.mark.asyncio
+async def test_spoolman_updated_event_logs_active_spool_refresh(caplog):
+    service = make_service(macro_variables={"spool_id"})
+    service.active_spool_id = 123
+
+    with caplog.at_level(logging.INFO):
+        await service.handle_spoolman_event(
+            {"resource": "spool", "type": "updated", "payload": {"id": 123}}
+        )
+
+    assert "Spoolman updated active spool 123" in caplog.text
 
 
 @pytest.mark.asyncio

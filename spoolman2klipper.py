@@ -106,14 +106,24 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
         """Push supported variables into Klipper, skipping undefined variables."""
 
         if self.moonraker_server is None:
+            logging.debug("Skipping Klipper variable push; Moonraker is not connected")
             return
         if self.macro_variables is None:
             await self.detect_macro_variables()
             if self.macro_variables is None:
+                logging.info(
+                    "Skipping Klipper variable push; macro %s is not available",
+                    self.klipper_macro,
+                )
                 return
 
         for variable_name, value in variables.items():
             if variable_name not in self.macro_variables:
+                logging.debug(
+                    "Skipping variable %s; macro %s does not define it",
+                    variable_name,
+                    self.klipper_macro,
+                )
                 continue
 
             script = self.format_set_variable_gcode(variable_name, value)
@@ -130,12 +140,15 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
         """Handle Moonraker's active spool notification payload."""
 
         spool_id = params.get("spool_id")
+        logging.info("Moonraker active spool changed to %s", spool_id)
         self.active_spool_id = spool_id
         if spool_id is None:
             self.active_spool_data = None
+            logging.info("Clearing Klipper spool variables")
             await self.push_klipper_variables(SPOOL_VARS_DEFAULT)
             return
 
+        logging.info("Fetching Spoolman data for active spool %s", spool_id)
         spool_data = await self.fetch_spool_info(spool_id)
         if spool_data is None:
             logging.info("Spool ID %s not found, clearing Klipper variables", spool_id)
@@ -152,6 +165,7 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
             return
 
         self.active_spool_data = spool_data
+        logging.info("Updating Klipper spool variables for active spool %s", spool_id)
         await self.push_klipper_variables(self.extract_spool_variables(spool_data))
 
     async def fetch_spool_info(
@@ -196,16 +210,27 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
 
         event_type = event.get("type")
         if event_type == "updated":
+            logging.info("Spoolman updated active spool %s", spool_id)
             self.active_spool_data = payload
             await self.push_klipper_variables(self.extract_spool_variables(payload))
         elif event_type == "deleted":
+            logging.info("Spoolman deleted active spool %s; clearing Klipper state", spool_id)
             self.active_spool_id = None
             self.active_spool_data = None
             await self.push_klipper_variables(SPOOL_VARS_DEFAULT)
 
+    async def handle_spoolman_status_changed(self, params: Dict[str, Any]) -> None:
+        """Log Moonraker's view of its Spoolman connection state."""
+
+        logging.info(
+            "Moonraker reports Spoolman connection status: %s",
+            params.get("spoolman_connected"),
+        )
+
     async def handle_klippy_ready(self, *_args: Any, **_kwargs: Any) -> None:
         """Refresh macro state after Klipper becomes ready."""
 
+        logging.info("Klipper is ready; refreshing %s macro state", self.klipper_macro)
         await self.detect_macro_variables()
         if self.active_spool_data is not None:
             await self.push_klipper_variables(
@@ -218,6 +243,7 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
     async def handle_klippy_disconnected(self, *_args: Any, **_kwargs: Any) -> None:
         """Clear cached macro metadata after Klipper disconnects or shuts down."""
 
+        logging.info("Klipper disconnected or shut down; clearing macro metadata cache")
         self.macro_variables = None
 
     async def detect_macro_variables(self) -> None:
@@ -227,7 +253,13 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
             self.macro_variables = None
             return
 
-        objects = await self.moonraker_server.printer.objects.list()
+        try:
+            objects = await self.moonraker_server.printer.objects.list()
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logging.warning("Unable to list Klipper objects: %s", exc)
+            self.macro_variables = None
+            return
+
         macro_key = f"gcode_macro {self.klipper_macro}"
         if macro_key not in objects.get("objects", []):
             logging.info("Klipper macro %s was not found", self.klipper_macro)
@@ -241,6 +273,11 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
             status = result.get("status", result)
             macro_state = status.get(macro_key, {})
             self.macro_variables = set(macro_state.keys())
+            logging.info(
+                "Detected Klipper macro %s with %s variable(s)",
+                self.klipper_macro,
+                len(self.macro_variables),
+            )
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logging.warning(
                 "Detected macro %s but could not query variables: %s",
@@ -256,12 +293,13 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
             return
 
         try:
-            response = await self.moonraker_server.server.spoolman.spool_id()
+            response = await self.moonraker_server.server.spoolman.get_spool_id()
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logging.warning("Unable to query current Moonraker active spool: %s", exc)
             return
 
         spool_id = self.parse_spool_id_response(response)
+        logging.info("Moonraker current active spool is %s", spool_id)
         await self.notify_active_spool_set({"spool_id": spool_id})
 
     async def _run_gcode(self, script: str) -> None:
@@ -270,7 +308,7 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
         logging.info("Run in Klipper: %s", script)
         await self.moonraker_server.printer.gcode.script(  # type: ignore[union-attr]
             script=script,
-            _notification=True,
+            _notification=False,
         )
 
     async def moonraker_connection_loop(self, max_cycles: Optional[int] = None) -> None:
@@ -297,18 +335,21 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
     async def moonraker_connection_cycle(self) -> None:
         """Run one Moonraker websocket connection until it closes."""
 
+        logging.info("Connecting to Moonraker websocket: %s", self.moonraker_url)
         self.moonraker_server = self.server_factory(self.moonraker_url)
         receive_task = None
         try:
             receive_task = await self.moonraker_server.ws_connect()
-            await self.detect_macro_variables()
+            logging.info("Connected to Moonraker websocket")
             self.register_moonraker_notification_handlers()
+            await self.detect_macro_variables()
 
             if self.sync_on_connect:
                 await self.sync_current_active_spool()
 
             await receive_task
         finally:
+            logging.info("Moonraker websocket disconnected")
             if receive_task is not None and not receive_task.done():
                 receive_task.cancel()
             await self.moonraker_server.close()
@@ -323,6 +364,9 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
         self.moonraker_server.notify_klippy_shutdown = self.handle_klippy_disconnected
         self.moonraker_server.notify_klippy_disconnected = (
             self.handle_klippy_disconnected
+        )
+        self.moonraker_server.notify_spoolman_status_changed = (
+            self.handle_spoolman_status_changed
         )
 
     async def spoolman_connection_loop(self) -> None:
@@ -343,11 +387,13 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
         if self.http_session is None:
             raise RuntimeError("HTTP session is not initialised")
 
+        logging.info("Connecting to Spoolman websocket: %s", self.spoolman_ws_url)
         async with self.http_session.ws_connect(
             self.spoolman_ws_url,
             heartbeat=20,
             timeout=self.request_timeout,
         ) as websocket:
+            logging.info("Connected to Spoolman websocket")
             async for message in websocket:
                 if message.type == aiohttp.WSMsgType.TEXT:
                     try:
@@ -356,6 +402,7 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
                         logging.debug("Ignored invalid Spoolman websocket event: %s", exc)
                 elif message.type == aiohttp.WSMsgType.ERROR:
                     raise aiohttp.ClientError("Spoolman websocket error")
+        logging.info("Spoolman websocket disconnected")
 
     async def _routine(self) -> None:
         async with aiohttp.ClientSession() as self.http_session:
@@ -439,4 +486,10 @@ if __name__ == "__main__":
         sys.exit(1)
 
     spoolman2klipper = Spoolman2Klipper(config_data)
+    logging.info(
+        "Starting %s with Moonraker %s and Spoolman API %s",
+        PROGNAME,
+        spoolman2klipper.moonraker_url,
+        spoolman2klipper.spoolman_url,
+    )
     spoolman2klipper.run()

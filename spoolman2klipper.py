@@ -68,6 +68,7 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
         self.active_spool_id: Optional[str] = None
         self.active_spool_data: Optional[Dict[str, Any]] = None
         self.spoolman_connection_warning_sent = False
+        self.spoolman_connection_announcement_id: Optional[str] = None
 
     def extract_spool_variables(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Flatten the Spoolman spool payload into Klipper macro variables."""
@@ -348,20 +349,45 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
             _notification=False,
         )
 
-    async def _notify_mainsail(self, message: str, message_type: str = "error") -> bool:
-        """Send a RESPOND message that printer web UIs can surface."""
+    async def _add_announcement(
+        self,
+        title: str,
+        description: str,
+        priority: str,
+    ) -> Optional[str]:
+        """Add a persistent Moonraker announcement for printer web UIs."""
 
         if self.moonraker_server is None:
-            logging.debug("Skipping Mainsail notification; Moonraker is not connected")
+            logging.debug("Skipping announcement; Moonraker is not connected")
+            return None
+
+        try:
+            entry = await self.moonraker_server.server.announcements.add_internal_announcement(
+                title=title,
+                desc=description,
+                url="",
+                priority=priority,
+                feed=PROGNAME,
+            )
+            return entry.get("entry_id")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logging.warning("Failed to create Moonraker announcement: %s", exc)
+            return None
+
+    async def _remove_announcement(self, entry_id: str) -> bool:
+        """Remove a persistent Moonraker announcement."""
+
+        if self.moonraker_server is None:
+            logging.debug("Skipping announcement removal; Moonraker is not connected")
             return False
 
-        safe_message = self._sanitise_gcode_string(message)
-        script = f'RESPOND TYPE={message_type} MSG="{safe_message}"'
         try:
-            await self._run_gcode(script)
+            await self.moonraker_server.server.announcements.remove_announcement(
+                entry_id
+            )
             return True
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            logging.warning("Failed to send Mainsail notification: %s", exc)
+            logging.warning("Failed to remove Moonraker announcement: %s", exc)
             return False
 
     async def _notify_spoolman_connection_failure(self, exc: Exception) -> None:
@@ -370,11 +396,16 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
         if self.spoolman_connection_warning_sent:
             return
 
-        message = (
-            f"{PROGNAME}: Unable to connect to Spoolman at "
-            f"{self.spoolman_ws_url}: {exc}"
+        description = (
+            f"Unable to connect to Spoolman at {self.spoolman_ws_url}: {exc}"
         )
-        if await self._notify_mainsail(message, "error"):
+        entry_id = await self._add_announcement(
+            f"{PROGNAME} cannot reach Spoolman",
+            description,
+            "warning",
+        )
+        if entry_id is not None:
+            self.spoolman_connection_announcement_id = entry_id
             self.spoolman_connection_warning_sent = True
 
     async def _notify_spoolman_connection_recovered(self) -> None:
@@ -383,7 +414,12 @@ class Spoolman2Klipper:  # pylint: disable=too-many-instance-attributes
         if not self.spoolman_connection_warning_sent:
             return
 
-        if await self._notify_mainsail(f"{PROGNAME}: Reconnected to Spoolman", "echo"):
+        if self.spoolman_connection_announcement_id is None:
+            self.spoolman_connection_warning_sent = False
+            return
+
+        if await self._remove_announcement(self.spoolman_connection_announcement_id):
+            self.spoolman_connection_announcement_id = None
             self.spoolman_connection_warning_sent = False
 
     async def moonraker_connection_loop(self, max_cycles: Optional[int] = None) -> None:
